@@ -12,7 +12,7 @@ private:
     std::vector<Order*> asks_;
 
 public:
-    void add_order(uint64_t id, uint64_t price, uint32_t qty, bool is_buy) {
+    void add_order(uint64_t id, uint64_t price, uint32_t qty, bool is_buy, bool is_market = false) {
         Order* order = pool_.allocate();
         if (!order) {
             std::cout << "Memory pool full!\n";
@@ -22,6 +22,7 @@ public:
         order->price = price;
         order->quantity = qty;
         order->is_buy = is_buy;
+        order->is_market = is_market;
 
         if (is_buy) {
             match_buy(order);
@@ -52,7 +53,8 @@ private:
 
             Order* best_ask = asks_.front();
 
-            if (buy_order->price >= best_ask->price) {
+            // Market orders match at any price; limit orders require buy price >= ask price
+            if (buy_order->is_market || buy_order->price >= best_ask->price) {
                 uint32_t traded_qty = std::min(buy_order->quantity, best_ask->quantity);
                 std::cout << "TRADE: Executed " << traded_qty << " units at price " << best_ask->price 
                           << " (Buy ID: " << buy_order->order_id << ", Sell ID: " << best_ask->order_id << ")\n";
@@ -69,10 +71,14 @@ private:
             }
         }
 
-        if (buy_order->quantity > 0) {
+        // Market orders never rest on the book if unfilled
+        if (buy_order->quantity > 0 && !buy_order->is_market) {
             bids_.push_back(buy_order);
-            std::cout << "Buy order added to book: ID " << buy_order->order_id << "\n";
+            std::cout << "Limit Buy order added to book: ID " << buy_order->order_id << "\n";
         } else {
+            if (buy_order->quantity > 0 && buy_order->is_market) {
+                std::cout << "Market Buy order partially unfilled, cancelling remainder: ID " << buy_order->order_id << "\n";
+            }
             pool_.deallocate(buy_order);
         }
     }
@@ -85,7 +91,8 @@ private:
 
             Order* best_bid = bids_.front();
 
-            if (sell_order->price <= best_bid->price) {
+            // Market orders match at any price; limit orders require sell price <= bid price
+            if (sell_order->is_market || sell_order->price <= best_bid->price) {
                 uint32_t traded_qty = std::min(sell_order->quantity, best_bid->quantity);
                 std::cout << "TRADE: Executed " << traded_qty << " units at price " << best_bid->price 
                           << " (Sell ID: " << sell_order->order_id << ", Buy ID: " << best_bid->order_id << ")\n";
@@ -102,10 +109,14 @@ private:
             }
         }
 
-        if (sell_order->quantity > 0) {
+        // Market orders never rest on the book if unfilled
+        if (sell_order->quantity > 0 && !sell_order->is_market) {
             asks_.push_back(sell_order);
-            std::cout << "Sell order added to book: ID " << sell_order->order_id << "\n";
+            std::cout << "Limit Sell order added to book: ID " << sell_order->order_id << "\n";
         } else {
+            if (sell_order->quantity > 0 && sell_order->is_market) {
+                std::cout << "Market Sell order partially unfilled, cancelling remainder: ID " << sell_order->order_id << "\n";
+            }
             pool_.deallocate(sell_order);
         }
     }
