@@ -1,42 +1,82 @@
 #include "OrderBook.hpp"
+#include "SPSCQueue.hpp"
 #include <iostream>
-#include <string>
-#include <sstream>
+#include <thread>
+#include <chrono>
+#include <vector>
+#include <numeric>
+#include <algorithm>
 
-// Simple FIX Message Parser helper (Extracts tag values)
-std::string get_fix_tag_value(const std::string& fix_msg, int tag) {
-    std::string search_str = std::to_string(tag) + "=";
-    size_t start = fix_msg.find(search_str);
-    if (start == std::string::npos) return "";
-    start += search_str.length();
-    size_t end = fix_msg.find('|', start);
-    if (end == std::string::npos) end = fix_msg.length();
-    return fix_msg.substr(start, end - start);
-}
+struct OrderCommand {
+    uint64_t id;
+    uint64_t price;
+    uint32_t qty;
+    bool is_buy;
+    bool is_market;
+    bool is_cancel;
+};
 
 int main() {
     OrderBook book;
-    book.set_trade_callback([](uint64_t buy_id, uint64_t sell_id, uint64_t price, uint32_t qty) {
-        std::cout << "[TRADE] Executed " << qty << " units at price " << price 
-                  << " (Buy ID: " << buy_id << ", Sell ID: " << sell_id << ")\n";
+    book.set_trade_callback([](uint64_t, uint64_t, uint64_t, uint32_t) {
+        // Zero-I/O in production
     });
 
-    // 1. Setup initial limit order on the book
-    book.add_order(1, 10050, 10, true, OrderType::LIMIT);
+    constexpr int NUM_ORDERS = 10000;
+    SPSCQueue<OrderCommand, 16384> queue;
+    std::atomic<bool> producer_done{false};
+    std::vector<double> latencies_ns;
+    latencies_ns.reserve(NUM_ORDERS);
 
-    // 2. Simulate incoming FIX Message for an IOC Order
-    // Tag 35=D (New Order), Tag 54=1 (Buy) or 2 (Sell), Tag 38=Qty, Tag 44=Price, Tag 40=OrderType (3=IOC)
-    std::string fix_order_ioc = "8=FIX.4.2|35=D|11=102|54=2|38=15|44=10050|40=3|";
-    
-    std::cout << "\nParsing FIX Message (IOC):\n" << fix_order_ioc << "\n";
-    uint64_t id = std::stoull(get_fix_tag_value(fix_order_ioc, 11));
-    bool is_buy = (get_fix_tag_value(fix_order_ioc, 54) == "1");
-    uint32_t qty = std::stoul(get_fix_tag_value(fix_order_ioc, 38));
-    uint64_t price = std::stoull(get_fix_tag_value(fix_order_ioc, 44));
-    
-    // Inject parsed IOC order
-    book.add_order(id, price, qty, is_buy, OrderType::IOC);
+    std::thread consumer([&]() {
+        OrderCommand cmd;
+        int processed = 0;
+        while (processed < NUM_ORDERS) {
+            if (queue.pop(cmd)) {
+                auto start = std::chrono::high_resolution_clock::now();
+                
+                OrderType type = cmd.is_market ? OrderType::MARKET : OrderType::LIMIT;
+                book.add_order(cmd.id, cmd.price, cmd.qty, cmd.is_buy, type);
+                
+                auto end = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double, std::nano> elapsed = end - start;
+                latencies_ns.push_back(elapsed.count());
+                processed++;
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    });
 
-    book.print_book();
+    std::thread producer([&]() {
+        for (int i = 0; i < NUM_ORDERS; ++i) {
+            bool is_buy = (i % 2 == 0);
+            uint64_t price = 10050 + (i % 5);
+            queue.push({static_cast<uint64_t>(i + 1), price, 10, is_buy, false, false});
+        }
+        producer_done.store(true, std::memory_order_relaxed);
+    });
+
+    producer.join();
+    consumer.join();
+
+    std::sort(latencies_ns.begin(), latencies_ns.end());
+    
+    double min_ns = latencies_ns.front();
+    double max_ns = latencies_ns.back();
+    double p50_ns = latencies_ns[NUM_ORDERS * 0.50];
+    double p99_ns = latencies_ns[NUM_ORDERS * 0.99];
+    
+    double sum = std::accumulate(latencies_ns.begin(), latencies_ns.end(), 0.0);
+    double avg_ns = sum / NUM_ORDERS;
+
+    std::cout << "--- OPTIMIZED BENCHMARK RESULTS (" << NUM_ORDERS << " Orders) ---\n";
+    std::cout << "Avg Latency: " << avg_ns << " ns\n";
+    std::cout << "Min Latency: " << min_ns << " ns\n";
+    std::cout << "p50 Latency: " << p50_ns << " ns\n";
+    std::cout << "p99 Latency: " << p99_ns << " ns\n";
+    std::cout << "Max Latency: " << max_ns << " ns\n";
+    std::cout << "---------------------------------------------------\n";
+
     return 0;
 }
