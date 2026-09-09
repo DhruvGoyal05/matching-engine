@@ -2,10 +2,17 @@
 
 int main() {
     OrderBook book;
-    book.add_order(1, 10050, 10, true);   // Add limit buy order
+    // Add multiple bids at different price levels
+    book.add_order(1, 10050, 10, true);
+    book.add_order(2, 10060, 5, true);   // Higher price, should be prioritized by std::greater
+    book.add_order(3, 10040, 20, true);  // Lower price
+
     book.print_book();
-    
-    book.cancel_order(1);                 // Cancel it
-    book.print_book();                    // Verify book is empty
+
+    // Add a sell order that crosses the spread and matches against the best bid first (ID 2 at 10060)
+    std::cout << "\n--- Incoming Sell Order ---\n";
+    book.add_order(4, 10050, 7, false);
+
+    book.print_book();
     return 0;
 }

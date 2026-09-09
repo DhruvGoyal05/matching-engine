@@ -2,6 +2,7 @@
 #include "Order.hpp"
 #include "MemoryPool.hpp"
 #include <iostream>
+#include <map>
 #include <vector>
 #include <algorithm>
 #include <unordered_map>
@@ -9,9 +10,11 @@
 class OrderBook {
 private:
     MemoryPool<1024> pool_;
-    std::vector<Order*> bids_;
-    std::vector<Order*> asks_;
-    std::unordered_map<uint64_t, Order*> order_map_; // Fast O(1) lookup for cancellations
+    // Asks: lowest price first (ascending order)
+    std::map<uint64_t, std::vector<Order*>> asks_;
+    // Bids: highest price first (descending order)
+    std::map<uint64_t, std::vector<Order*>, std::greater<uint64_t>> bids_;
+    std::unordered_map<uint64_t, Order*> order_map_;
 
 public:
     void add_order(uint64_t id, uint64_t price, uint32_t qty, bool is_buy, bool is_market = false) {
@@ -44,11 +47,24 @@ public:
 
         Order* order = it->second;
 
-        // Remove from bids_ or asks_ vector
         if (order->is_buy) {
-            bids_.erase(std::remove(bids_.begin(), bids_.end(), order), bids_.end());
+            auto price_it = bids_.find(order->price);
+            if (price_it != bids_.end()) {
+                auto& vec = price_it->second;
+                vec.erase(std::remove(vec.begin(), vec.end(), order), vec.end());
+                if (vec.empty()) {
+                    bids_.erase(price_it);
+                }
+            }
         } else {
-            asks_.erase(std::remove(asks_.begin(), asks_.end(), order), asks_.end());
+            auto price_it = asks_.find(order->price);
+            if (price_it != asks_.end()) {
+                auto& vec = price_it->second;
+                vec.erase(std::remove(vec.begin(), vec.end(), order), vec.end());
+                if (vec.empty()) {
+                    asks_.erase(price_it);
+                }
+            }
         }
 
         pool_.deallocate(order);
@@ -59,12 +75,16 @@ public:
     void print_book() const {
         std::cout << "--- ORDER BOOK ---\n";
         std::cout << "Asks:\n";
-        for (const auto& ask : asks_) {
-            std::cout << "  ID: " << ask->order_id << " | Price: " << ask->price << " | Qty: " << ask->quantity << "\n";
+        for (const auto& [price, orders] : asks_) {
+            for (const auto& ask : orders) {
+                std::cout << "  ID: " << ask->order_id << " | Price: " << price << " | Qty: " << ask->quantity << "\n";
+            }
         }
         std::cout << "Bids:\n";
-        for (const auto& bid : bids_) {
-            std::cout << "  ID: " << bid->order_id << " | Price: " << bid->price << " | Qty: " << bid->quantity << "\n";
+        for (const auto& [price, orders] : bids_) {
+            for (const auto& bid : orders) {
+                std::cout << "  ID: " << bid->order_id << " | Price: " << price << " | Qty: " << bid->quantity << "\n";
+            }
         }
         std::cout << "------------------\n";
     }
@@ -72,24 +92,27 @@ public:
 private:
     void match_buy(Order* buy_order) {
         while (buy_order->quantity > 0 && !asks_.empty()) {
-            std::sort(asks_.begin(), asks_.end(), [](Order* a, Order* b) {
-                return a->price < b->price;
-            });
+            auto best_ask_it = asks_.begin();
+            uint64_t best_price = best_ask_it->first;
+            auto& ask_vector = best_ask_it->second;
+            Order* best_ask = ask_vector.front();
 
-            Order* best_ask = asks_.front();
-
-            if (buy_order->is_market || buy_order->price >= best_ask->price) {
+            if (buy_order->is_market || buy_order->price >= best_price) {
                 uint32_t traded_qty = std::min(buy_order->quantity, best_ask->quantity);
-                std::cout << "TRADE: Executed " << traded_qty << " units at price " << best_ask->price 
+                std::cout << "TRADE: Executed " << traded_qty << " units at price " << best_price 
                           << " (Buy ID: " << buy_order->order_id << ", Sell ID: " << best_ask->order_id << ")\n";
 
                 buy_order->quantity -= traded_qty;
                 best_ask->quantity -= traded_qty;
 
                 if (best_ask->quantity == 0) {
-                    asks_.erase(asks_.begin());
+                    ask_vector.erase(ask_vector.begin());
                     order_map_.erase(best_ask->order_id);
                     pool_.deallocate(best_ask);
+
+                    if (ask_vector.empty()) {
+                        asks_.erase(best_ask_it);
+                    }
                 }
             } else {
                 break;
@@ -97,7 +120,7 @@ private:
         }
 
         if (buy_order->quantity > 0 && !buy_order->is_market) {
-            bids_.push_back(buy_order);
+            bids_[buy_order->price].push_back(buy_order);
             std::cout << "Limit Buy order added to book: ID " << buy_order->order_id << "\n";
         } else {
             if (buy_order->quantity > 0 && buy_order->is_market) {
@@ -110,24 +133,27 @@ private:
 
     void match_sell(Order* sell_order) {
         while (sell_order->quantity > 0 && !bids_.empty()) {
-            std::sort(bids_.begin(), bids_.end(), [](Order* a, Order* b) {
-                return a->price > b->price;
-            });
+            auto best_bid_it = bids_.begin();
+            uint64_t best_price = best_bid_it->first;
+            auto& bid_vector = best_bid_it->second;
+            Order* best_bid = bid_vector.front();
 
-            Order* best_bid = bids_.front();
-
-            if (sell_order->is_market || sell_order->price <= best_bid->price) {
+            if (sell_order->is_market || sell_order->price <= best_price) {
                 uint32_t traded_qty = std::min(sell_order->quantity, best_bid->quantity);
-                std::cout << "TRADE: Executed " << traded_qty << " units at price " << best_bid->price 
+                std::cout << "TRADE: Executed " << traded_qty << " units at price " << best_price 
                           << " (Sell ID: " << sell_order->order_id << ", Buy ID: " << best_bid->order_id << ")\n";
 
                 sell_order->quantity -= traded_qty;
                 best_bid->quantity -= traded_qty;
 
                 if (best_bid->quantity == 0) {
-                    bids_.erase(bids_.begin());
+                    bid_vector.erase(bid_vector.begin());
                     order_map_.erase(best_bid->order_id);
                     pool_.deallocate(best_bid);
+
+                    if (bid_vector.empty()) {
+                        bids_.erase(best_bid_it);
+                    }
                 }
             } else {
                 break;
@@ -135,7 +161,7 @@ private:
         }
 
         if (sell_order->quantity > 0 && !sell_order->is_market) {
-            asks_.push_back(sell_order);
+            asks_[sell_order->price].push_back(sell_order);
             std::cout << "Limit Sell order added to book: ID " << sell_order->order_id << "\n";
         } else {
             if (sell_order->quantity > 0 && sell_order->is_market) {
